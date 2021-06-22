@@ -142,41 +142,54 @@ void mbedtls_ccm_free( mbedtls_ccm_context *ctx )
             (dst)[i] = (src)[i] ^ ctx->b[i];                                   \
     } while( 0 )
 
-/*
- * Authenticated encryption or decryption
- */
-static int ccm_auth_crypt( mbedtls_ccm_context *ctx, int mode, size_t length,
-                           const unsigned char *iv, size_t iv_len,
-                           const unsigned char *add, size_t add_len,
-                           const unsigned char *input, unsigned char *output,
-                           unsigned char *tag, size_t tag_len )
+static int mbedtls_ccm_calculate_first_block(mbedtls_ccm_context *ctx)
 {
     int ret = MBEDTLS_ERR_ERROR_CORRUPTION_DETECTED;
     unsigned char i;
     size_t len_left, olen;
-    const unsigned char *src;
-    unsigned char *dst;
 
-    ctx->mode = mode;
+    if( ctx->y[0] != 0xAB || ctx->y[1] != 0xAB )
+        return 0;
 
-    /*
-     * Check length requirements: SP800-38C A.1
-     * Additional requirement: a < 2^16 - 2^8 to simplify the code.
-     * 'length' checked later (when writing it to the first block)
-     *
-     * Also, loosen the requirements to enable support for CCM* (IEEE 802.15.4).
-     */
-    if( tag_len == 2 || tag_len > 16 || tag_len % 2 != 0 )
+    for( i = 0, len_left = ctx->plaintext_len; i < ctx->q; i++, len_left >>= 8 )
+        ctx->b[15-i] = (unsigned char)( len_left & 0xFF );
+
+    if( len_left > 0 )
         return( MBEDTLS_ERR_CCM_BAD_INPUT );
 
+    /* Start CBC-MAC with first block */
+    memset( ctx->y, 0, 16 );
+    UPDATE_CBC_MAC;
+
+    return (0);
+}
+
+int mbedtls_ccm_starts( mbedtls_ccm_context *ctx,
+                        int mode,
+                        const unsigned char *iv,
+                        size_t iv_len )
+{
     /* Also implies q is within bounds */
     if( iv_len < 7 || iv_len > 13 )
         return( MBEDTLS_ERR_CCM_BAD_INPUT );
 
-    if( add_len >= 0xFF00 )
-        return( MBEDTLS_ERR_CCM_BAD_INPUT );
-
+    ctx->mode = mode;
     ctx->q = 16 - 1 - (unsigned char) iv_len;
+
+    /*
+     * Prepare counter block for encryption:
+     * 0        .. 0        flags
+     * 1        .. iv_len   nonce (aka iv)
+     * iv_len+1 .. 15       counter (initially 1)
+     *
+     * With flags as (bits):
+     * 7 .. 3   0
+     * 2 .. 0   q - 1
+     */
+    ctx->ctr[0] = ctx->q - 1;
+    memcpy( ctx->ctr + 1, iv, iv_len );
+    memset( ctx->ctr + 1 + iv_len, 0, ctx->q );
+    ctx->ctr[15] = 1;
 
     /*
      * First block B_0:
@@ -190,23 +203,71 @@ static int ccm_auth_crypt( mbedtls_ccm_context *ctx, int mode, size_t length,
      * 5 .. 3   (t - 2) / 2
      * 2 .. 0   q - 1
      */
-    ctx->b[0] = 0;
-    ctx->b[0] |= ( add_len > 0 ) << 6;
-    ctx->b[0] |= ( ( tag_len - 2 ) / 2 ) << 3;
     ctx->b[0] |= ctx->q - 1;
 
     memcpy( ctx->b + 1, iv, iv_len );
 
-    for( i = 0, len_left = length; i < ctx->q; i++, len_left >>= 8 )
-        ctx->b[15-i] = (unsigned char)( len_left & 0xFF );
+    /* Warning: using the Y buffer to indicate that this function was executed.
+     * This is done to avoid using a dedicate variable in ccm context.
+     * The Y buffer is used in mbedtls_ccm_update and mbedtls_ccm_update_ad
+     * and will have to be cleared before decryption/encryption */
+    ctx->y[0] = 0xAB;
 
-    if( len_left > 0 )
+    return mbedtls_ccm_calculate_first_block(ctx);
+}
+
+int mbedtls_ccm_set_lengths( mbedtls_ccm_context *ctx,
+                             size_t total_ad_len,
+                             size_t plaintext_len,
+                             size_t tag_len )
+{
+    /*
+     * Check length requirements: SP800-38C A.1
+     * Additional requirement: a < 2^16 - 2^8 to simplify the code.
+     * 'length' checked later (when writing it to the first block)
+     *
+     * Also, loosen the requirements to enable support for CCM* (IEEE 802.15.4).
+     */
+    if( tag_len == 2 || tag_len > 16 || tag_len % 2 != 0 )
         return( MBEDTLS_ERR_CCM_BAD_INPUT );
 
+    if( total_ad_len >= 0xFF00 )
+        return( MBEDTLS_ERR_CCM_BAD_INPUT );
 
-    /* Start CBC-MAC with first block */
-    memset( ctx->y, 0, 16 );
-    UPDATE_CBC_MAC;
+    /*
+     * First block B_0:
+     * 0        .. 0        flags
+     * 1        .. iv_len   nonce (aka iv)
+     * iv_len+1 .. 15       length
+     *
+     * With flags as (bits):
+     * 7        0
+     * 6        add present?
+     * 5 .. 3   (t - 2) / 2
+     * 2 .. 0   q - 1
+     */
+    ctx->b[0] |= ( total_ad_len > 0 ) << 6;
+    ctx->b[0] |= ( ( tag_len - 2 ) / 2 ) << 3;
+
+    ctx->plaintext_len = plaintext_len;
+
+    /* Warning: using the Y buffer to indicate that this function was executed.
+     * This is done to avoid using a dedicate variable in ccm context.
+     * The Y buffer is used in mbedtls_ccm_update and mbedtls_ccm_update_ad
+     * and will have to be cleared before decryption/encryption */
+    ctx->y[1] = 0xAB;
+
+    return mbedtls_ccm_calculate_first_block(ctx);
+}
+
+int mbedtls_ccm_update_ad( mbedtls_ccm_context *ctx,
+                           const unsigned char *add,
+                           size_t add_len )
+{
+    int ret = MBEDTLS_ERR_ERROR_CORRUPTION_DETECTED;
+    unsigned char i;
+    size_t len_left, olen;
+    const unsigned char *src;
 
     /*
      * If there is additional data, update CBC-MAC with
@@ -242,20 +303,24 @@ static int ccm_auth_crypt( mbedtls_ccm_context *ctx, int mode, size_t length,
         }
     }
 
-    /*
-     * Prepare counter block for encryption:
-     * 0        .. 0        flags
-     * 1        .. iv_len   nonce (aka iv)
-     * iv_len+1 .. 15       counter (initially 1)
-     *
-     * With flags as (bits):
-     * 7 .. 3   0
-     * 2 .. 0   q - 1
-     */
-    ctx->ctr[0] = ctx->q - 1;
-    memcpy( ctx->ctr + 1, iv, iv_len );
-    memset( ctx->ctr + 1 + iv_len, 0, ctx->q );
-    ctx->ctr[15] = 1;
+    return (0);
+}
+
+int mbedtls_ccm_update( mbedtls_ccm_context *ctx,
+                        const unsigned char *input, size_t input_len,
+                        unsigned char *output, size_t output_size,
+                        size_t *output_len )
+{
+    int ret = MBEDTLS_ERR_ERROR_CORRUPTION_DETECTED;
+    unsigned char i;
+    size_t len_left, olen;
+    const unsigned char *src;
+    unsigned char *dst;
+
+    if( output_size < input_len )
+        return( MBEDTLS_ERR_CCM_BAD_INPUT );
+    CCM_VALIDATE_RET( output_length != NULL );
+    *output_len = input_len;
 
     /*
      * Authenticate and {en,de}crypt the message.
@@ -263,7 +328,7 @@ static int ccm_auth_crypt( mbedtls_ccm_context *ctx, int mode, size_t length,
      * The only difference between encryption and decryption is
      * the respective order of authentication and {en,de}cryption.
      */
-    len_left = length;
+    len_left = input_len;
     src = input;
     dst = output;
 
@@ -300,6 +365,16 @@ static int ccm_auth_crypt( mbedtls_ccm_context *ctx, int mode, size_t length,
                 break;
     }
 
+    return (0);
+}
+
+int mbedtls_ccm_finish( mbedtls_ccm_context *ctx,
+                        unsigned char *tag, size_t tag_len )
+{
+    int ret = MBEDTLS_ERR_ERROR_CORRUPTION_DETECTED;
+    unsigned char i;
+    size_t olen;
+
     /*
      * Authentication: reset counter and crypt/mask internal tag
      */
@@ -308,6 +383,37 @@ static int ccm_auth_crypt( mbedtls_ccm_context *ctx, int mode, size_t length,
 
     CTR_CRYPT( ctx->y, ctx->y, 16 );
     memcpy( tag, ctx->y, tag_len );
+
+    return( 0 );
+}
+
+/*
+ * Authenticated encryption or decryption
+ */
+static int ccm_auth_crypt( mbedtls_ccm_context *ctx, int mode, size_t length,
+                           const unsigned char *iv, size_t iv_len,
+                           const unsigned char *add, size_t add_len,
+                           const unsigned char *input, unsigned char *output,
+                           unsigned char *tag, size_t tag_len )
+{
+    int ret = MBEDTLS_ERR_ERROR_CORRUPTION_DETECTED;
+    size_t olen;
+
+    if( ( ret = mbedtls_ccm_starts( ctx, mode, iv, iv_len ) ) != 0 )
+        return( ret );
+
+    if( ( ret = mbedtls_ccm_set_lengths( ctx, add_len, length, tag_len ) ) != 0 )
+        return( ret );
+
+    if( ( ret = mbedtls_ccm_update_ad( ctx, add, add_len ) ) != 0 )
+        return( ret );
+
+    if( ( ret = mbedtls_ccm_update( ctx, input, length,
+                                    output, length, &olen ) ) != 0 )
+        return( ret );
+
+    if( ( ret = mbedtls_ccm_finish( ctx, tag, tag_len ) ) != 0 )
+        return( ret );
 
     return( 0 );
 }

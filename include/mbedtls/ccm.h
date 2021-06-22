@@ -79,6 +79,7 @@ typedef struct mbedtls_ccm_context
     unsigned char MBEDTLS_PRIVATE(y)[16];    /*!< The Y working buffer */
     unsigned char MBEDTLS_PRIVATE(q);        /*!< The Q working value */
     unsigned char MBEDTLS_PRIVATE(ctr)[16];  /*!< The counter buffer */
+    size_t MBEDTLS_PRIVATE(plaintext_len);   /*!< The counter buffer */
     int MBEDTLS_PRIVATE(mode);               /*!< The operation to perform:
                                                 #MBEDTLS_CCM_ENCRYPT or
                                                 #MBEDTLS_CCM_DECRYPT or
