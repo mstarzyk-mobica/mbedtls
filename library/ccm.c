@@ -142,13 +142,37 @@ void mbedtls_ccm_free( mbedtls_ccm_context *ctx )
             (dst)[i] = (src)[i] ^ ctx->b[i];                                   \
     } while( 0 )
 
+/* The Y buffer is used to track the execution order of the
+ * mbedtls_ccm_starts() and mbedtls_ccm_set_lengths()
+ */
+#define SET__CCM_STARTS__BEGIN(ctx)          (ctx->y[0] = 1)
+#define IS_SET__CCM_STARTS__BEGIN(ctx)       (ctx->y[0] == 1)
+#define SET__CCM_STARTS__END(ctx)            (ctx->y[1] = 1)
+#define IS_SET__CCM_STARTS__END(ctx)         (ctx->y[1] == 1)
+#define SET__CCM_SET_LENGTHS__BEGIN(ctx)     (ctx->y[2] = 1)
+#define IS_SET__CCM_SET_LENGTHS__BEGIN(ctx)  (ctx->y[2] == 1)
+#define SET__CCM_SET_LENGTHS__END(ctx)       (ctx->y[3] = 1)
+#define IS_SET__CCM_SET_LENGTHS__END(ctx)    (ctx->y[3] == 1)
+
+static void mbedtls_clear_B0(mbedtls_ccm_context *ctx)
+{
+    /* B0 must be cleared at the beginning of the encryption/decryption.
+     * If mbedtls_ccm_starts() clears it, then mbedtls_ccm_set_lengths()
+     * must not clear it.
+     * If mbedtls_ccm_set_lengths() clears it, then mbedtls_ccm_starts()
+     * must not clear it.
+     */
+    if( IS_SET__CCM_STARTS__BEGIN(ctx) ^ IS_SET__CCM_SET_LENGTHS__BEGIN(ctx) )
+        ctx->b[0] = 0;
+}
+
 static int mbedtls_ccm_calculate_first_block(mbedtls_ccm_context *ctx)
 {
     int ret = MBEDTLS_ERR_ERROR_CORRUPTION_DETECTED;
     unsigned char i;
     size_t len_left, olen;
 
-    if( ctx->y[0] != 0xAB || ctx->y[1] != 0xAB )
+    if( !IS_SET__CCM_STARTS__END(ctx) || !IS_SET__CCM_SET_LENGTHS__END(ctx) )
         return 0;
 
     for( i = 0, len_left = ctx->plaintext_len; i < ctx->q; i++, len_left >>= 8 )
@@ -157,8 +181,11 @@ static int mbedtls_ccm_calculate_first_block(mbedtls_ccm_context *ctx)
     if( len_left > 0 )
         return( MBEDTLS_ERR_CCM_BAD_INPUT );
 
-    /* Start CBC-MAC with first block */
+    /* Clear Y buffer after using it for tracking the call order of
+     * mbedtls_ccm_starts() and mbedtls_ccm_set_lengths() functions.
+     */
     memset( ctx->y, 0, 16 );
+    /* Start CBC-MAC with first block*/
     UPDATE_CBC_MAC;
 
     return (0);
@@ -169,9 +196,17 @@ int mbedtls_ccm_starts( mbedtls_ccm_context *ctx,
                         const unsigned char *iv,
                         size_t iv_len )
 {
+    int ret;
+
     /* Also implies q is within bounds */
     if( iv_len < 7 || iv_len > 13 )
         return( MBEDTLS_ERR_CCM_BAD_INPUT );
+
+    /* Warning: using the Y buffer for tracking the call order of
+     * mbedtls_ccm_starts() and mbedtls_ccm_set_lengths() functions.
+     */
+    SET__CCM_STARTS__BEGIN(ctx);
+    mbedtls_clear_B0(ctx);
 
     ctx->mode = mode;
     ctx->q = 16 - 1 - (unsigned char) iv_len;
@@ -207,13 +242,13 @@ int mbedtls_ccm_starts( mbedtls_ccm_context *ctx,
 
     memcpy( ctx->b + 1, iv, iv_len );
 
-    /* Warning: using the Y buffer to indicate that this function was executed.
-     * This is done to avoid using a dedicate variable in ccm context.
-     * The Y buffer is used in mbedtls_ccm_update and mbedtls_ccm_update_ad
-     * and will have to be cleared before decryption/encryption */
-    ctx->y[0] = 0xAB;
+    /* Warning: using the Y buffer for tracking the call order of
+     * mbedtls_ccm_starts() and mbedtls_ccm_set_lengths() functions.
+     */
+    SET__CCM_STARTS__END(ctx);
+    ret = mbedtls_ccm_calculate_first_block(ctx);
 
-    return mbedtls_ccm_calculate_first_block(ctx);
+    return ret;
 }
 
 int mbedtls_ccm_set_lengths( mbedtls_ccm_context *ctx,
@@ -221,6 +256,8 @@ int mbedtls_ccm_set_lengths( mbedtls_ccm_context *ctx,
                              size_t plaintext_len,
                              size_t tag_len )
 {
+    int ret;
+
     /*
      * Check length requirements: SP800-38C A.1
      * Additional requirement: a < 2^16 - 2^8 to simplify the code.
@@ -233,6 +270,12 @@ int mbedtls_ccm_set_lengths( mbedtls_ccm_context *ctx,
 
     if( total_ad_len >= 0xFF00 )
         return( MBEDTLS_ERR_CCM_BAD_INPUT );
+
+    /* Warning: using the Y buffer for tracking the call order of
+     * mbedtls_ccm_starts() and mbedtls_ccm_set_lengths() functions.
+     */
+    SET__CCM_SET_LENGTHS__BEGIN(ctx);
+    mbedtls_clear_B0(ctx);
 
     /*
      * First block B_0:
@@ -251,13 +294,13 @@ int mbedtls_ccm_set_lengths( mbedtls_ccm_context *ctx,
 
     ctx->plaintext_len = plaintext_len;
 
-    /* Warning: using the Y buffer to indicate that this function was executed.
-     * This is done to avoid using a dedicate variable in ccm context.
-     * The Y buffer is used in mbedtls_ccm_update and mbedtls_ccm_update_ad
-     * and will have to be cleared before decryption/encryption */
-    ctx->y[1] = 0xAB;
+    /* Warning: using the Y buffer for tracking the call order of
+     * mbedtls_ccm_starts() and mbedtls_ccm_set_lengths() functions.
+     */
+    SET__CCM_SET_LENGTHS__END(ctx);
+    ret = mbedtls_ccm_calculate_first_block(ctx);
 
-    return mbedtls_ccm_calculate_first_block(ctx);
+    return ret;
 }
 
 int mbedtls_ccm_update_ad( mbedtls_ccm_context *ctx,
