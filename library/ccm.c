@@ -163,7 +163,7 @@ static void mbedtls_clear_B0(mbedtls_ccm_context *ctx)
      * must not clear it.
      */
     if( IS_SET__CCM_STARTS__BEGIN(ctx) ^ IS_SET__CCM_SET_LENGTHS__BEGIN(ctx) )
-        ctx->b[0] = 0;
+        memset( ctx->b, 0, 16);
 }
 
 static int mbedtls_ccm_calculate_first_block(mbedtls_ccm_context *ctx)
@@ -221,6 +221,7 @@ int mbedtls_ccm_starts( mbedtls_ccm_context *ctx,
      * 7 .. 3   0
      * 2 .. 0   q - 1
      */
+    memset( ctx->ctr, 0, 16);
     ctx->ctr[0] = ctx->q - 1;
     memcpy( ctx->ctr + 1, iv, iv_len );
     memset( ctx->ctr + 1 + iv_len, 0, ctx->q );
