@@ -159,9 +159,18 @@ static int mbedtls_ccm_calculate_first_block(mbedtls_ccm_context *ctx)
     unsigned char i;
     size_t len_left, olen;
 
+    /* length calulcation can be done only after both
+     * mbedtls_ccm_starts() and mbedtls_ccm_set_lengths() have been executed
+     */
     if( !(ctx->state & CCM_STATE__STARTED) || !(ctx->state & CCM_STATE__LENGHTS_SET) )
         return 0;
 
+    /*
+     * First block B_0:
+     * 0        .. 0        flags           - set by: mbedtls_ccm_starts() and mbedtls_ccm_set_lenghts()
+     * 1        .. iv_len   nonce (aka iv)  - set by: mbedtls_ccm_starts()
+     * iv_len+1 .. 15       length          - set by: mbedtls_ccm_calculate_first_block()
+     */
     for( i = 0, len_left = ctx->plaintext_len; i < ctx->q; i++, len_left >>= 8 )
         ctx->b[15-i] = (unsigned char)( len_left & 0xFF );
 
@@ -205,15 +214,15 @@ int mbedtls_ccm_starts( mbedtls_ccm_context *ctx,
 
     /*
      * First block B_0:
-     * 0        .. 0        flags
-     * 1        .. iv_len   nonce (aka iv)
-     * iv_len+1 .. 15       length
+     * 0        .. 0        flags           - set by: mbedtls_ccm_starts() and mbedtls_ccm_set_lenghts()
+     * 1        .. iv_len   nonce (aka iv)  - set by: mbedtls_ccm_starts()
+     * iv_len+1 .. 15       length          - set by: mbedtls_ccm_calculate_first_block()
      *
      * With flags as (bits):
      * 7        0
-     * 6        add present?
-     * 5 .. 3   (t - 2) / 2
-     * 2 .. 0   q - 1
+     * 6        add present?                - set by: mbedtls_ccm_set_lengths()
+     * 5 .. 3   (t - 2) / 2                 - set by: mbedtls_ccm_set_lengths()
+     * 2 .. 0   q - 1                       - set by: mbedtls_ccm_starts()
      */
     ctx->b[0] |= ctx->q - 1;
 
@@ -247,15 +256,15 @@ int mbedtls_ccm_set_lengths( mbedtls_ccm_context *ctx,
 
     /*
      * First block B_0:
-     * 0        .. 0        flags
-     * 1        .. iv_len   nonce (aka iv)
-     * iv_len+1 .. 15       length
+     * 0        .. 0        flags           - set by: mbedtls_ccm_starts() and mbedtls_ccm_set_lenghts()
+     * 1        .. iv_len   nonce (aka iv)  - set by: mbedtls_ccm_starts()
+     * iv_len+1 .. 15       length          - set by: mbedtls_ccm_calculate_first_block()
      *
      * With flags as (bits):
      * 7        0
-     * 6        add present?
-     * 5 .. 3   (t - 2) / 2
-     * 2 .. 0   q - 1
+     * 6        add present?                - set by: mbedtls_ccm_set_lengths()
+     * 5 .. 3   (t - 2) / 2                 - set by: mbedtls_ccm_set_lengths()
+     * 2 .. 0   q - 1                       - set by: mbedtls_ccm_starts()
      */
     ctx->b[0] |= ( total_ad_len > 0 ) << 6;
     ctx->b[0] |= ( ( tag_len - 2 ) / 2 ) << 3;
