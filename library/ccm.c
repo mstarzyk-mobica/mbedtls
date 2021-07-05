@@ -427,6 +427,7 @@ int mbedtls_ccm_finish( mbedtls_ccm_context *ctx,
 
     CTR_CRYPT( ctx->y, ctx->y, 16 );
     memcpy( tag, ctx->y, tag_len );
+    memset( ctx->y, 0, 16); /* clear Y buffer for the next encrypt/decrypt operation */
 
     return( 0 );
 }
