@@ -142,28 +142,15 @@ void mbedtls_ccm_free( mbedtls_ccm_context *ctx )
             (dst)[i] = (src)[i] ^ ctx->b[i];                                   \
     } while( 0 )
 
-/* The Y buffer is used to track the execution order of the
- * mbedtls_ccm_starts() and mbedtls_ccm_set_lengths()
- */
-#define SET__CCM_STARTS__BEGIN(ctx)          (ctx->y[0] = 1)
-#define IS_SET__CCM_STARTS__BEGIN(ctx)       (ctx->y[0] == 1)
-#define SET__CCM_STARTS__END(ctx)            (ctx->y[1] = 1)
-#define IS_SET__CCM_STARTS__END(ctx)         (ctx->y[1] == 1)
-#define SET__CCM_SET_LENGTHS__BEGIN(ctx)     (ctx->y[2] = 1)
-#define IS_SET__CCM_SET_LENGTHS__BEGIN(ctx)  (ctx->y[2] == 1)
-#define SET__CCM_SET_LENGTHS__END(ctx)       (ctx->y[3] = 1)
-#define IS_SET__CCM_SET_LENGTHS__END(ctx)    (ctx->y[3] == 1)
+#define CCM_STATE__CLEAR                0
+#define CCM_STATE__STARTED              0x0001
+#define CCM_STATE__LENGHTS_SET          0x0002
 
-static void mbedtls_clear_B0(mbedtls_ccm_context *ctx)
-{
-    /* B0 must be cleared at the beginning of the encryption/decryption.
-     * If mbedtls_ccm_starts() clears it, then mbedtls_ccm_set_lengths()
-     * must not clear it.
-     * If mbedtls_ccm_set_lengths() clears it, then mbedtls_ccm_starts()
-     * must not clear it.
-     */
-    if( IS_SET__CCM_STARTS__BEGIN(ctx) ^ IS_SET__CCM_SET_LENGTHS__BEGIN(ctx) )
-        memset( ctx->b, 0, 16);
+static void mbedtls_ccm_clear_state(mbedtls_ccm_context *ctx) {
+    ctx->state = CCM_STATE__CLEAR;
+    memset( ctx->b, 0, 16);
+    memset( ctx->y, 0, 16);
+    memset( ctx->ctr, 0, 16);
 }
 
 static int mbedtls_ccm_calculate_first_block(mbedtls_ccm_context *ctx)
@@ -172,7 +159,7 @@ static int mbedtls_ccm_calculate_first_block(mbedtls_ccm_context *ctx)
     unsigned char i;
     size_t len_left, olen;
 
-    if( !IS_SET__CCM_STARTS__END(ctx) || !IS_SET__CCM_SET_LENGTHS__END(ctx) )
+    if( !(ctx->state & CCM_STATE__STARTED) || !(ctx->state & CCM_STATE__LENGHTS_SET) )
         return 0;
 
     for( i = 0, len_left = ctx->plaintext_len; i < ctx->q; i++, len_left >>= 8 )
@@ -181,10 +168,6 @@ static int mbedtls_ccm_calculate_first_block(mbedtls_ccm_context *ctx)
     if( len_left > 0 )
         return( MBEDTLS_ERR_CCM_BAD_INPUT );
 
-    /* Clear Y buffer after using it for tracking the call order of
-     * mbedtls_ccm_starts() and mbedtls_ccm_set_lengths() functions.
-     */
-    memset( ctx->y, 0, 16 );
     /* Start CBC-MAC with first block*/
     UPDATE_CBC_MAC;
 
@@ -202,12 +185,6 @@ int mbedtls_ccm_starts( mbedtls_ccm_context *ctx,
     if( iv_len < 7 || iv_len > 13 )
         return( MBEDTLS_ERR_CCM_BAD_INPUT );
 
-    /* Warning: using the Y buffer for tracking the call order of
-     * mbedtls_ccm_starts() and mbedtls_ccm_set_lengths() functions.
-     */
-    SET__CCM_STARTS__BEGIN(ctx);
-    mbedtls_clear_B0(ctx);
-
     ctx->mode = mode;
     ctx->q = 16 - 1 - (unsigned char) iv_len;
 
@@ -221,7 +198,6 @@ int mbedtls_ccm_starts( mbedtls_ccm_context *ctx,
      * 7 .. 3   0
      * 2 .. 0   q - 1
      */
-    memset( ctx->ctr, 0, 16);
     ctx->ctr[0] = ctx->q - 1;
     memcpy( ctx->ctr + 1, iv, iv_len );
     memset( ctx->ctr + 1 + iv_len, 0, ctx->q );
@@ -243,10 +219,7 @@ int mbedtls_ccm_starts( mbedtls_ccm_context *ctx,
 
     memcpy( ctx->b + 1, iv, iv_len );
 
-    /* Warning: using the Y buffer for tracking the call order of
-     * mbedtls_ccm_starts() and mbedtls_ccm_set_lengths() functions.
-     */
-    SET__CCM_STARTS__END(ctx);
+    ctx->state |= CCM_STATE__STARTED;
     ret = mbedtls_ccm_calculate_first_block(ctx);
 
     return ret;
@@ -272,12 +245,6 @@ int mbedtls_ccm_set_lengths( mbedtls_ccm_context *ctx,
     if( total_ad_len >= 0xFF00 )
         return( MBEDTLS_ERR_CCM_BAD_INPUT );
 
-    /* Warning: using the Y buffer for tracking the call order of
-     * mbedtls_ccm_starts() and mbedtls_ccm_set_lengths() functions.
-     */
-    SET__CCM_SET_LENGTHS__BEGIN(ctx);
-    mbedtls_clear_B0(ctx);
-
     /*
      * First block B_0:
      * 0        .. 0        flags
@@ -295,10 +262,7 @@ int mbedtls_ccm_set_lengths( mbedtls_ccm_context *ctx,
 
     ctx->plaintext_len = plaintext_len;
 
-    /* Warning: using the Y buffer for tracking the call order of
-     * mbedtls_ccm_starts() and mbedtls_ccm_set_lengths() functions.
-     */
-    SET__CCM_SET_LENGTHS__END(ctx);
+    ctx->state |= CCM_STATE__LENGHTS_SET;
     ret = mbedtls_ccm_calculate_first_block(ctx);
 
     return ret;
@@ -427,7 +391,7 @@ int mbedtls_ccm_finish( mbedtls_ccm_context *ctx,
 
     CTR_CRYPT( ctx->y, ctx->y, 16 );
     memcpy( tag, ctx->y, tag_len );
-    memset( ctx->y, 0, 16); /* clear Y buffer for the next encrypt/decrypt operation */
+    mbedtls_ccm_clear_state(ctx);
 
     return( 0 );
 }
