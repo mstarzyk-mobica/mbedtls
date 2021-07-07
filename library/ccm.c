@@ -109,13 +109,10 @@ void mbedtls_ccm_free( mbedtls_ccm_context *ctx )
 }
 
 /*
- * Macros for common operations.
- * Results in smaller compiled code than static inline functions.
- */
-
-/*
  * Update the CBC-MAC state in y using a block in b
  * (Always using b as the source helps the compiler optimise a bit better.)
+ *
+ * Macro results in smaller compiled code than static inline functions.
  */
 #define UPDATE_CBC_MAC                                                                        \
     for( i = 0; i < 16; i++ )                                                                 \
@@ -127,30 +124,14 @@ void mbedtls_ccm_free( mbedtls_ccm_context *ctx )
         return( ret );                                                                        \
     }                                                                                         \
 
-/*
- * Encrypt or decrypt a partial block with CTR
- * Warning: using b for temporary storage! src and dst must not be b!
- * This avoids allocating one more 16 bytes buffer while allowing src == dst.
- */
-#define CTR_CRYPT( dst, src, len  )                                            \
-    do                                                                         \
-    {                                                                          \
-        if( ( ret = mbedtls_cipher_update( &ctx->cipher_ctx, ctx->ctr,         \
-                                           16, ctx->b, &olen ) ) != 0 )        \
-        {                                                                      \
-            ctx->state |= CCM_STATE__ERROR;                                    \
-            return( ret );                                                     \
-        }                                                                      \
-                                                                               \
-        for( i = 0; i < (len); i++ )                                           \
-            (dst)[i] = (src)[i] ^ ctx->b[i];                                   \
-    } while( 0 )
-
 #define CCM_STATE__CLEAR                0
 #define CCM_STATE__STARTED              0x0001
 #define CCM_STATE__LENGHTS_SET          0x0002
 #define CCM_STATE__ERROR                0x0004
 
+/*
+ * Encrypt or decrypt a partial block with CTR
+ */
 static int mbedtls_ccm_crypt( mbedtls_ccm_context *ctx,
                               size_t offset, size_t use_len,
                               const unsigned char *input,
@@ -351,59 +332,67 @@ int mbedtls_ccm_update( mbedtls_ccm_context *ctx,
 {
     int ret = MBEDTLS_ERR_ERROR_CORRUPTION_DETECTED;
     unsigned char i;
-    size_t len_left, olen;
-    const unsigned char *src;
-    unsigned char *dst;
+    size_t use_len, offset, olen;
 
     if( output_size < input_len )
         return( MBEDTLS_ERR_CCM_BAD_INPUT );
     CCM_VALIDATE_RET( output_length != NULL );
     *output_len = input_len;
 
-    /*
-     * Authenticate and {en,de}crypt the message.
-     *
-     * The only difference between encryption and decryption is
-     * the respective order of authentication and {en,de}cryption.
-     */
-    len_left = input_len;
-    src = input;
-    dst = output;
-
-    while( len_left > 0 )
+    if( ctx->processed == 0 )
     {
-        size_t use_len = len_left > 16 ? 16 : len_left;
-
-        if( ctx->mode == CCM_ENCRYPT )
-        {
-            memset( ctx->b, 0, 16 );
-            memcpy( ctx->b, src, use_len );
-            UPDATE_CBC_MAC;
-        }
-
-        mbedtls_ccm_crypt( ctx, 0, use_len, src, dst );
-
-        if( ctx->mode == CCM_DECRYPT )
-        {
-            memset( ctx->b, 0, 16 );
-            memcpy( ctx->b, dst, use_len );
-            UPDATE_CBC_MAC;
-        }
-
-        dst += use_len;
-        src += use_len;
-        len_left -= use_len;
-
-        /*
-         * Increment counter.
-         * No need to check for overflow thanks to the length check above.
-         */
-        for( i = 0; i < ctx->q; i++ )
-            if( ++(ctx->ctr)[15-i] != 0 )
-                break;
+        memset( ctx->b, 0, 16 );
     }
 
-    return (0);
+    while ( input_len > 0 )
+    {
+        offset = ctx->processed % 16;
+
+        use_len = 16 - offset;
+
+        if( use_len > input_len )
+            use_len = input_len;
+
+        ctx->processed += use_len;
+        memcpy( ctx->b + offset, input, use_len );
+
+        if( use_len + offset == 16 || ctx->processed == ctx->plaintext_len )
+        {
+            if( ctx->mode == CCM_ENCRYPT )
+            {
+                UPDATE_CBC_MAC;
+                ret = mbedtls_ccm_crypt( ctx, 0, use_len, ctx->b, output );
+                if( ret != 0 )
+                    return ret;
+                memset( ctx->b, 0, 16 );
+            }
+
+            if( ctx->mode == CCM_DECRYPT )
+            {
+                ret = mbedtls_ccm_crypt( ctx, 0, use_len, ctx->b, output );
+                if( ret != 0 )
+                    return ret;
+                memset( ctx->b, 0, 16 );
+                memcpy( ctx->b, output, use_len );
+                UPDATE_CBC_MAC;
+                memset( ctx->b, 0, 16 );
+            }
+
+            input_len -= use_len;
+            input += use_len;
+            output += use_len;
+
+            /*
+            * Increment counter.
+            * No need to check for overflow thanks to the length check above.
+            */
+            for( i = 0; i < ctx->q; i++ )
+                if( ++(ctx->ctr)[15-i] != 0 )
+                    break;
+        }
+    }
+
+    return 0;
 }
 
 int mbedtls_ccm_finish( mbedtls_ccm_context *ctx,
@@ -411,7 +400,6 @@ int mbedtls_ccm_finish( mbedtls_ccm_context *ctx,
 {
     int ret = MBEDTLS_ERR_ERROR_CORRUPTION_DETECTED;
     unsigned char i;
-    size_t olen;
 
     /*
      * Authentication: reset counter and crypt/mask internal tag
@@ -419,7 +407,9 @@ int mbedtls_ccm_finish( mbedtls_ccm_context *ctx,
     for( i = 0; i < ctx->q; i++ )
         ctx->ctr[15-i] = 0;
 
-    mbedtls_ccm_crypt( ctx, 0, 16, ctx->y, ctx->y );
+    ret = mbedtls_ccm_crypt( ctx, 0, 16, ctx->y, ctx->y );
+    if( ret != 0 )
+        return ret;
     memcpy( tag, ctx->y, tag_len );
     mbedtls_ccm_clear_state(ctx);
 
