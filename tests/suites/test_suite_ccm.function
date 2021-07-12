@@ -245,8 +245,8 @@ void mbedtls_ccm_auth_decrypt( int cipher_id, data_t * key,
     msg->len -= tag_len;
     memcpy( tag, msg->x + msg->len, tag_len );
 
-    uint8_t *io_msg = NULL;
-    ASSERT_ALLOC( io_msg, msg->len );
+    uint8_t * io_msg = (uint8_t *)malloc( msg->len + 2 );
+    memset( io_msg, 0, msg->len + 2 );
     memcpy( io_msg, msg->x, msg->len );
 
     TEST_ASSERT( mbedtls_ccm_setkey( &ctx, cipher_id, key->x, key->len * 8 ) == 0 );
@@ -254,6 +254,9 @@ void mbedtls_ccm_auth_decrypt( int cipher_id, data_t * key,
     /* Test with input == output */
     TEST_ASSERT( mbedtls_ccm_auth_decrypt( &ctx, msg->len, iv->x, iv->len, add->x, add->len,
                  io_msg, io_msg, tag, tag_len ) == result );
+
+    /* Check we didn't write past the end */
+    TEST_ASSERT( io_msg[msg->len] == 0 && io_msg[msg->len + 1] == 0 );
 
     if( result == 0 )
     {
@@ -285,7 +288,7 @@ void mbedtls_ccm_auth_decrypt( int cipher_id, data_t * key,
     }
 
 exit:
-    mbedtls_free(io_msg);
+    free(io_msg);
     mbedtls_ccm_free( &ctx );
 }
 /* END_CASE */
